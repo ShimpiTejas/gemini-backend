@@ -38,6 +38,10 @@ app.post('/ask', async (req, res) => {
     }
 });
 
+app.get('/', (req, res)=>{
+    res.status(200).send("HEY THERE FROM BACKEND")
+})
+
 app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
 });
