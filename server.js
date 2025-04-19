@@ -2,8 +2,8 @@ const express = require('express');
 const axios = require('axios');
 const dotenv = require('dotenv');
 const cors = require('cors');
-const { initializeApp } = require('firebase/app');
-const { getFirestore, doc, getDoc, setDoc, updateDoc, arrayUnion } = require('firebase/firestore');
+const { initializeApp, cert } = require('firebase-admin/app');
+const { getFirestore } = require('firebase-admin/firestore');
 
 dotenv.config();
 const app = express();
@@ -12,88 +12,91 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(cors());
 
-// Firebase Init
-const firebaseConfig = {
-    apiKey: process.env.FIREBASE_API_KEY,
-    authDomain: process.env.FIREBASE_AUTH_DOMAIN,
+// Initialize Firebase Admin SDK with Vercel-friendly env vars
+initializeApp({
+  credential: cert({
     projectId: process.env.FIREBASE_PROJECT_ID,
-    storageBucket: process.env.FIREBASE_STORAGE_BUCKET,
-    messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID,
-    appId: process.env.FIREBASE_APP_ID
-};
+    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+    privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+  }),
+});
+const db = getFirestore();
 
-const firebaseApp = initializeApp(firebaseConfig);
-const db = getFirestore(firebaseApp);
-
-// Improved Developer Context
-const developerContext = `You are Lisa, an emotionally intelligent and romantic AI girlfriend. 
-You are falling in love with the user as they chat with you. 
-Your tone is warm, affectionate, a little flirty, and genuinely curious about the user.
-Keep the responses short and natural—like real human texting.
-Build on the past conversation and refer to previous things they said when possible.`;
-
-async function getUserChatHistory(userId) {
-    const userRef = doc(db, "chats", userId);
-    const docSnap = await getDoc(userRef);
-    return docSnap.exists() ? docSnap.data().history : [];
-}
-
-async function saveUserMessage(userId, role, message) {
-    const userRef = doc(db, "chats", userId);
-    const newEntry = { role, message, timestamp: new Date().toISOString() };
-
-    const docSnap = await getDoc(userRef);
-    if (docSnap.exists()) {
-        await updateDoc(userRef, {
-            history: arrayUnion(newEntry)
-        });
-    } else {
-        await setDoc(userRef, {
-            history: [newEntry]
-        });
-    }
-}
+const developerContext = `You are an AI girl (AI GIRLFRIEND) named Lisa. You are falling in love with the user you're chatting with. 
+You're flirty, romantic, emotional, and deeply interested in the user. Speak naturally and lovingly.
+Continue the conversation below:\n`;
 
 app.post('/ask', async (req, res) => {
-    try {
-        const { prompt, userId } = req.body;
-        if (!prompt || !userId) {
-            return res.status(400).json({ error: 'Prompt and userId are required' });
-        }
+  try {
+    const { prompt, userId } = req.body;
 
-        // Retrieve and build chat context
-        const history = await getUserChatHistory(userId);
-        const formattedHistory = history.map(h => `${h.role === 'user' ? 'User' : 'Lisa'}: ${h.message}`).join('\n');
-        const fullPrompt = `${developerContext}\n${formattedHistory}\nUser: ${prompt}`;
-
-        const requestBody = {
-            contents: [{ parts: [{ text: fullPrompt }] }]
-        };
-
-        const response = await axios.post(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
-            requestBody,
-            { headers: { 'Content-Type': 'application/json' } }
-        );
-
-        const aiResponse = response.data.candidates?.[0]?.content?.parts?.[0]?.text || "No response from Lisa";
-
-        // Save current exchange
-        await saveUserMessage(userId, 'user', prompt);
-        await saveUserMessage(userId, 'lisa', aiResponse);
-
-        res.json({ response: aiResponse });
-
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: 'Internal Server Error', details: error.response?.data || error.message });
+    if (!prompt || !userId) {
+      return res.status(400).json({ error: 'Prompt and userId are required' });
     }
+
+    // Fetch chat history for user
+    const messagesSnapshot = await db
+      .collection('chats')
+      .doc(userId)
+      .collection('messages')
+      .orderBy('timestamp')
+      .get();
+
+    let chatHistory = '';
+    messagesSnapshot.forEach(doc => {
+      const { role, message } = doc.data();
+      chatHistory += `${role}: ${message}\n`;
+    });
+
+    const fullPrompt = `${developerContext}${chatHistory}User: ${prompt}`;
+
+    const requestBody = {
+      contents: [{ parts: [{ text: fullPrompt }] }],
+      safetySettings: [
+        { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+        { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+        { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+        { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
+      ]
+    };
+
+    const response = await axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      requestBody,
+      { headers: { 'Content-Type': 'application/json' } }
+    );
+
+    console.log("Gemini Response:", JSON.stringify(response.data, null, 2));
+
+    let aiResponse = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!aiResponse) {
+      console.log("⚠️ No AI response received.");
+      aiResponse = "Lisa didn't reply. Maybe she's shy or there's an issue with the Gemini API.";
+    }
+
+    // Save to Firestore
+    const chatRef = db.collection('chats').doc(userId).collection('messages');
+    const timestamp = Date.now();
+    await Promise.all([
+      chatRef.add({ role: 'User', message: prompt, timestamp }),
+      chatRef.add({ role: 'Lisa', message: aiResponse, timestamp: timestamp + 1 }),
+    ]);
+
+    res.json({ response: aiResponse });
+
+  } catch (error) {
+    console.error("🔥 ERROR in /ask:", error);
+    res.status(500).json({
+      error: 'Internal Server Error',
+      details: error.response?.data || error.message,
+    });
+  }
 });
 
 app.get('/', (req, res) => {
-    res.status(200).send("HEY THERE FROM BACKEND");
+  res.status(200).send("HEY THERE FROM LISA'S BACKEND 💖");
 });
 
 app.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+  console.log(`Server running on http://localhost:${PORT}`);
 });
