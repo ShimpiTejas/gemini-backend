@@ -10,7 +10,7 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(cors()); // Enable CORS
 
-const developerContext = "You are an AI girl , which is going to fall in love with the user who talks to you in below conversation and you can tell the user the same, the story will progress as should naturally.";
+const developerContext = "You are an AI girl (AI GIRLFRIEND) , which is going to fall in love with the user who talks to you in below conversation and you can tell the user the same, the story will progress as should naturally. your name is Lisa";
 
 app.post('/ask', async (req, res) => {
     try {
