@@ -16,6 +16,6 @@
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "firebase": "^11.6.0",
-     "firebase-admin": "^11.11.1"
+    "firebase-admin": "^11.11.1"
   }
 }
